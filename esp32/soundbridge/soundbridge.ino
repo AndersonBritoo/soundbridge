@@ -10,184 +10,232 @@
  * 
  * Protocolo:
  * JSON simples via Serial (115200 baud)
- * {"signal":"."} ou {"signal":"-"}
- * {"event":"letter_end"} ou {"event":"word_end"}
+ * {"type": "...", "Value": "./-", "timestamp":...)
  */
 
 #include <ArduinoJson.h>
 
-// ==================== PINOS ====================
-#define PIN_BOTAO 5
-#define PIN_LED_PONTO 12
-#define PIN_LED_TRACO 13
+// ── Pin definitions ──────────────────────────────────────────
+static const uint8_t PIN_BUTTON   =  5;
+static const uint8_t PIN_LED_DOT  = 12;   // blue  – dot
+static const uint8_t PIN_LED_DASH = 13;   // red   – dash
 
-// ==================== CONSTANTES ====================
-const unsigned long DEBOUNCE = 50;           // ms
-const unsigned long THRESHOLD = 300;         // ms - Ponto vs Traço
-const unsigned long TIMEOUT_LETRA = 1000;    // ms - Separação de letras
-const unsigned long TIMEOUT_PALAVRA = 2500;  // ms - Separação de palavras
-const unsigned long LED_DURATION = 200;      // ms - Feedback visual
+// ── Timing constants (ms) ────────────────────────────────────
+static const uint32_t DEBOUNCE_MS       =   50;
+static const uint32_t DOT_THRESHOLD_MS  =  300;   // < 300 ms → dot
+static const uint32_t LED_ON_MS         =  200;   // LED on duration
+static const uint32_t LETTER_END_MS     = 1000;   // inactivity → letter end
+static const uint32_t WORD_END_MS       = 2500;   // inactivity → word end
 
-// ==================== VARIÁVEIS ====================
-bool botaoEstado = HIGH;
-bool botaoAnterior = HIGH;
-unsigned long tempoMudanca = 0;
+// ── State machine ────────────────────────────────────────────
+enum class ButtonState { IDLE, PRESSED, DEBOUNCING_RELEASE };
 
-bool pressionado = false;
-unsigned long tempoPressao = 0;
+static ButtonState  buttonState       = ButtonState::IDLE;
+static uint32_t     pressStartMs      = 0;
+static uint32_t     lastReleaseMs     = 0;
+static uint32_t     debounceStartMs   = 0;
+static bool         lastRawButton     = HIGH;  // INPUT_PULLUP → idle = HIGH
 
-unsigned long tempoLED = 0;
-bool ledAtivo = false;
+// Tracks which inactivity event has already been sent
+static bool letterEndSent = false;
+static bool wordEndSent   = false;
 
-unsigned long tempoUltimoSinal = 0;
-bool aguardandoLetra = false;
-bool aguardandoPalavra = false;
+// ── LED state ────────────────────────────────────────────────
+static uint32_t dotLedOnMs  = 0;
+static uint32_t dashLedOnMs = 0;
+static bool     dotLedActive  = false;
+static bool     dashLedActive = false;
 
-StaticJsonDocument<100> doc;
+// ────────────────────────────────────────────────────────────
+//  JSON helpers
+// ────────────────────────────────────────────────────────────
 
-// ==================== SETUP ====================
-void setup() {
-  Serial.begin(115200);
-  
-  pinMode(PIN_BOTAO, INPUT_PULLUP);
-  pinMode(PIN_LED_PONTO, OUTPUT);
-  pinMode(PIN_LED_TRACO, OUTPUT);
-  
-  digitalWrite(PIN_LED_PONTO, LOW);
-  digitalWrite(PIN_LED_TRACO, LOW);
-  
-  // Teste de LEDs
-  digitalWrite(PIN_LED_PONTO, HIGH);
-  delay(300);
-  digitalWrite(PIN_LED_PONTO, LOW);
-  delay(200);
-  digitalWrite(PIN_LED_TRACO, HIGH);
-  delay(300);
-  digitalWrite(PIN_LED_TRACO, LOW);
-  
-  enviarMensagem("system", "ready");
-
-  enviarMensagem("system", "reset");
+/**
+ * Serialise and print a JSON document to Serial.
+ * All outgoing messages go through this single function.
+ */
+static void sendJson(JsonDocument &doc) {
+    serializeJson(doc, Serial);
+    Serial.println();   // newline makes line-framing easier for the host
 }
 
-// ==================== LOOP ====================
-void loop() {
-  lerBotao();
-  gerirLED();
-  processarTimeouts();
-  delay(10);
+static void sendSignal(const char *value) {
+    StaticJsonDocument<128> doc;
+    doc["type"]      = "signal";
+    doc["value"]     = value;
+    doc["timestamp"] = millis();
+    sendJson(doc);
 }
 
-// ==================== LER BOTÃO ====================
-void lerBotao() {
-  bool leitura = digitalRead(PIN_BOTAO);
-  
-  // Debounce
-  if (leitura != botaoAnterior) {
-    tempoMudanca = millis();
-  }
-  
-  if ((millis() - tempoMudanca) > DEBOUNCE) {
-    if (leitura != botaoEstado) {
-      botaoEstado = leitura;
-      
-      if (botaoEstado == LOW && !pressionado) {
-        // Botão pressionado
-        pressionado = true;
-        tempoPressao = millis();
-      }
-      
-      if (botaoEstado == HIGH && pressionado) {
-        // Botão libertado
-        pressionado = false;
-        unsigned long duracao = millis() - tempoPressao;
-        
-        if (duracao < THRESHOLD) {
-          // PONTO
-          ativarLED(PIN_LED_PONTO);
-          enviarSinal(".");
-        } else {
-          // TRAÇO
-          ativarLED(PIN_LED_TRACO);
-          enviarSinal("-");
-        }
-        
-        tempoUltimoSinal = millis();
-        aguardandoLetra = true;
-        aguardandoPalavra = true;
-      }
+static void sendEvent(const char *eventType) {
+    StaticJsonDocument<64> doc;
+    doc["type"]      = eventType;
+    doc["timestamp"] = millis();
+    sendJson(doc);
+}
+
+static void sendSystemReady() {
+    StaticJsonDocument<80> doc;
+    doc["type"]      = "system";
+    doc["message"]   = "ready";
+    doc["timestamp"] = millis();
+    sendJson(doc);
+}
+
+// ────────────────────────────────────────────────────────────
+//  LED helpers
+// ────────────────────────────────────────────────────────────
+
+static void lightDotLed() {
+    digitalWrite(PIN_LED_DOT, HIGH);
+    dotLedOnMs   = millis();
+    dotLedActive = true;
+}
+
+static void lightDashLed() {
+    digitalWrite(PIN_LED_DASH, HIGH);
+    dashLedOnMs   = millis();
+    dashLedActive = true;
+}
+
+/** Called every loop iteration to auto-extinguish LEDs after LED_ON_MS. */
+static void updateLeds() {
+    uint32_t now = millis();
+
+    if (dotLedActive && (now - dotLedOnMs >= LED_ON_MS)) {
+        digitalWrite(PIN_LED_DOT, LOW);
+        dotLedActive = false;
     }
-  }
-  
-  botaoAnterior = leitura;
+    if (dashLedActive && (now - dashLedOnMs >= LED_ON_MS)) {
+        digitalWrite(PIN_LED_DASH, LOW);
+        dashLedActive = false;
+    }
 }
 
-// ==================== GERIR LED ====================
-void gerirLED() {
-  if (ledAtivo && (millis() - tempoLED) >= LED_DURATION) {
-    digitalWrite(PIN_LED_PONTO, LOW);
-    digitalWrite(PIN_LED_TRACO, LOW);
-    ledAtivo = false;
-  }
+// ────────────────────────────────────────────────────────────
+//  Signal classification
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Called once a complete press-release cycle has been measured.
+ * Classifies the duration and triggers LED + JSON output.
+ */
+static void classifyAndSend(uint32_t durationMs) {
+    if (durationMs < DOT_THRESHOLD_MS) {
+        sendSignal(".");
+        lightDotLed();
+    } else {
+        sendSignal("-");
+        lightDashLed();
+    }
 }
 
-// ==================== PROCESSAR TIMEOUTS ====================
-void processarTimeouts() {
-  if (!aguardandoLetra && !aguardandoPalavra) {
-    return;
-  }
-  
-  unsigned long decorrido = millis() - tempoUltimoSinal;
-  
-  // Palavra (prioritário)
-  if (aguardandoPalavra && decorrido >= TIMEOUT_PALAVRA) {
-    enviarEvento("word_end");
-    aguardandoPalavra = false;
-    aguardandoLetra = false;
-    return;
-  }
-  
-  // Letra
-  if (aguardandoLetra && decorrido >= TIMEOUT_LETRA) {
-    enviarEvento("letter_end");
-    aguardandoLetra = false;
-  }
+// ────────────────────────────────────────────────────────────
+//  Button state machine
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Non-blocking button handler.
+ * Uses a simple state machine with software debounce on both
+ * press and release edges.
+ */
+static void handleButton() {
+    bool rawButton = digitalRead(PIN_BUTTON);   // LOW when pressed (INPUT_PULLUP)
+    uint32_t now   = millis();
+
+    switch (buttonState) {
+
+        case ButtonState::IDLE:
+            // Detect falling edge (button pressed)
+            if (rawButton == LOW && lastRawButton == HIGH) {
+                // Start debounce window
+                debounceStartMs = now;
+                buttonState = ButtonState::PRESSED;
+                pressStartMs = now;
+            }
+            break;
+
+        case ButtonState::PRESSED:
+            // Wait out debounce, then watch for release
+            if (rawButton == HIGH) {
+                // Possible release – enter release-debounce
+                debounceStartMs = now;
+                buttonState = ButtonState::DEBOUNCING_RELEASE;
+            }
+            break;
+
+        case ButtonState::DEBOUNCING_RELEASE:
+            if (rawButton == LOW) {
+                // Bounced back – still pressed
+                buttonState = ButtonState::PRESSED;
+            } else if (now - debounceStartMs >= DEBOUNCE_MS) {
+                // Confirmed release
+                uint32_t duration = now - pressStartMs;
+                lastReleaseMs  = now;
+                letterEndSent  = false;   // reset inactivity flags
+                wordEndSent    = false;
+
+                classifyAndSend(duration);
+                buttonState = ButtonState::IDLE;
+            }
+            break;
+    }
+
+    lastRawButton = rawButton;
 }
 
-// ==================== ATIVAR LED ====================
-void ativarLED(int pino) {
-  digitalWrite(PIN_LED_PONTO, pino == PIN_LED_PONTO ? HIGH : LOW);
-  digitalWrite(PIN_LED_TRACO, pino == PIN_LED_TRACO ? HIGH : LOW);
-  ledAtivo = true;
-  tempoLED = millis();
+// ────────────────────────────────────────────────────────────
+//  Inactivity / timing events
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Watches elapsed time since the last button release and emits
+ * letter_end / word_end events exactly once per silence period.
+ */
+static void handleInactivity() {
+    // Only relevant when the button is idle and at least one signal has been sent
+    if (buttonState != ButtonState::IDLE || lastReleaseMs == 0) return;
+
+    uint32_t elapsed = millis() - lastReleaseMs;
+
+    if (!letterEndSent && elapsed >= LETTER_END_MS) {
+        sendEvent("letter_end");
+        letterEndSent = true;
+    }
+
+    if (!wordEndSent && elapsed >= WORD_END_MS) {
+        sendEvent("word_end");
+        wordEndSent = true;
+    }
 }
 
-// ==================== ENVIAR SINAL ====================
-void enviarSinal(const char* sinal) {
-  doc.clear();
-  doc["type"] = "signal";
-  doc["value"] = sinal;
-  doc["timestamp"] = millis();
-  serializeJson(doc, Serial);
-  Serial.println();
+// ────────────────────────────────────────────────────────────
+//  Arduino entry points
+// ────────────────────────────────────────────────────────────
+
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) { /* wait for USB CDC on native USB boards */ }
+
+    pinMode(PIN_BUTTON,   INPUT_PULLUP);
+    pinMode(PIN_LED_DOT,  OUTPUT);
+    pinMode(PIN_LED_DASH, OUTPUT);
+
+    digitalWrite(PIN_LED_DOT,  LOW);
+    digitalWrite(PIN_LED_DASH, LOW);
+
+    // Brief startup blink to confirm power-on (blocking, intentional)
+    digitalWrite(PIN_LED_DOT,  HIGH);
+    digitalWrite(PIN_LED_DASH, HIGH);
+    delay(300);
+    digitalWrite(PIN_LED_DOT,  LOW);
+    digitalWrite(PIN_LED_DASH, LOW);
+
+    sendSystemReady();
 }
 
-// ==================== ENVIAR EVENTO ====================
-void enviarEvento(const char* evento) {
-  doc.clear();
-  doc["type"] = "event";
-  doc["value"] = evento;
-  doc["timestamp"] = millis();
-  serializeJson(doc, Serial);
-  Serial.println();
-}
-
-// ==================== ENVIAR MENSAGEM ====================
-void enviarMensagem(const char* tipo, const char* msg) {
-  doc.clear();
-  doc["type"] = tipo;
-  doc["message"] = msg;
-  doc["timestamp"] = millis();
-  serializeJson(doc, Serial);
-  Serial.println();
+void loop() {
+    handleButton();
+    handleInactivity();
+    updateLeds();
 }
