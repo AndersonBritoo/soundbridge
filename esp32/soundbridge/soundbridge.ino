@@ -1,4 +1,5 @@
 /*
+ * Path: esp32/soundbridge/soundbridge.ino
  * SoundBridge - ESP32 Firmware
  * Sistema de captura de sinais Morse
  * 
