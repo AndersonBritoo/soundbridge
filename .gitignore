@@ -445,3 +445,8 @@ lcov.info
 # Usually ephemeral working files; not source artifacts.
 *.diff
 *.patch
+
+# ---------------------------------
+Backup
+# ---------------------------------
+backup/*
