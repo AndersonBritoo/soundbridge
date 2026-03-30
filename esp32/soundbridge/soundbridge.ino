@@ -10,7 +10,7 @@
  * 
  * Protocolo:
  * JSON simples via Serial (115200 baud)
- * {"type": "...", "Value": "./-", "timestamp":...)
+ * {"type": "...", "value": "...", "timestamp": ...}
  */
 
 #include <ArduinoJson.h>
