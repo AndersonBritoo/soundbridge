@@ -1,15 +1,15 @@
 /*
  * Path: esp32/soundbridge/soundbridge.ino
  * SoundBridge - ESP32 Firmware
- * Sistema de captura de sinais Morse
+ * Morse code capture system
  * 
  * Hardware:
- * - Botão: GPIO 5 (INPUT_PULLUP)
- * - LED Ponto (Azul): GPIO 12
- * - LED Traço (Vermelho): GPIO 13
+ * - Button: GPIO 5 (INPUT_PULLUP)
+ * - LED dot (Blue): GPIO 12
+ * - LED dash (Red): GPIO 13
  * 
- * Protocolo:
- * JSON simples via Serial (115200 baud)
+ * Protocol:
+ * JSON simple via serial (115200 baud)
  * {"type": "...", "value": "...", "timestamp": ...}
  */
 
