@@ -16,6 +16,8 @@
 #  GET  /morse          List all stored messages
 #  GET  /morse/{id}     Retrieve a single message
 #  GET  /health         Liveness probe
+#
+#  Stop with Ctrl-C.
 # =============================================================
 
 import logging
