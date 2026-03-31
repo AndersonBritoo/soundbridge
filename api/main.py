@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # =============================================================
 #  SoundBridge – FastAPI Backend
+#  Path: api\main.py
 #  Receives decoded Morse words from the Gateway and persists
 #  them to MySQL.
 #
