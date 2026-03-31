@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================
 #  SoundBridge – FastAPI Backend
-#  Path: api\main.py
-#  Receives decoded Morse words from the Gateway and persists
-#  them to MySQL.
+#  Path: api/main.py
+#  Receives raw ESP32 events, processes Morse logic, and
+#  persists completed words to MySQL.
 #
 #  Run
 #  ---
@@ -13,7 +13,7 @@
 #
 #  Endpoints
 #  ---------
-#  POST /morse          Accept a word from the gateway
+#  POST /morse          Accept event or legacy word payload
 #  GET  /morse          List all stored messages
 #  GET  /morse/{id}     Retrieve a single message
 #  GET  /health         Liveness probe
@@ -25,6 +25,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime   import datetime
+from typing     import Dict, List, Any
 
 import mysql.connector
 import mysql.connector.pooling
@@ -52,6 +53,75 @@ POOL_SIZE = 5   # concurrent connections available to the API
 
 # Module-level pool reference (initialised inside lifespan)
 _pool: mysql.connector.pooling.MySQLConnectionPool | None = None
+
+# ── Morse Decoder (copied from gateway/morse_decoder.py) ─────
+_MORSE_TABLE: Dict[str, str] = {
+    # Letters
+    ".-":    "A",  "-...":  "B",  "-.-.":  "C",  "-..":   "D",
+    ".":     "E",  "..-.":  "F",  "--.":   "G",  "....":  "H",
+    "..":    "I",  ".---":  "J",  "-.-":   "K",  ".-..":  "L",
+    "--":    "M",  "-.":    "N",  "---":   "O",  ".--.":  "P",
+    "--.-":  "Q",  ".-.":   "R",  "...":   "S",  "-":     "T",
+    "..-":   "U",  "...-":  "V",  ".--":   "W",  "-..-":  "X",
+    "-.--":  "Y",  "--..":  "Z",
+    # Digits
+    "-----": "0",  ".----": "1",  "..---": "2",  "...--": "3",
+    "....-": "4",  ".....": "5",  "-....": "6",  "--...": "7",
+    "---..": "8",  "----.": "9",
+    # Punctuation
+    ".-.-.-": ".",   "--..--": ",",   "..--..": "?",
+    ".----.": "'",   "-.-.--": "!",   "-..-.":  "/",
+    "-.--.":  "(",   "-.--.-": ")",   ".-...":  "&",
+    "---...": ":",   "-.-.-.": ";",   "-...-":  "=",
+    ".-.-.":  "+",   "-....-": "-",   ".-..-.": '"',
+    ".--.-.": "@",
+}
+
+
+def morse_to_char(code: str) -> str | None:
+    """Decode a single Morse sequence into its character."""
+    stripped = code.strip()
+    if not stripped:
+        return None
+    
+    char = _MORSE_TABLE.get(stripped)
+    if char is None:
+        logger.warning("Unknown Morse sequence: '%s' – skipping.", stripped)
+    else:
+        logger.debug("Decoded '%s' → '%s'.", stripped, char)
+    
+    return char
+
+
+# ── Device State Management ───────────────────────────────────
+
+class DeviceState:
+    """Stateful Morse processor for a single device."""
+    
+    def __init__(self, device_id: str):
+        self.device_id = device_id
+        self.current_letter = ""           # accumulator for current letter
+        self.current_word_morse: List[str] = []  # Morse codes for current word
+        self.current_word_text: List[str] = []   # decoded chars for current word
+    
+    def reset(self):
+        """Clear all state."""
+        self.current_letter = ""
+        self.current_word_morse = []
+        self.current_word_text = []
+        logger.debug("[%s] State reset.", self.device_id)
+
+
+# Global state storage: device_id → DeviceState
+device_states: Dict[str, DeviceState] = {}
+
+
+def get_device_state(device_id: str) -> DeviceState:
+    """Get or create a DeviceState for the given device."""
+    if device_id not in device_states:
+        device_states[device_id] = DeviceState(device_id)
+        logger.info("[%s] New device state created.", device_id)
+    return device_states[device_id]
 
 
 # =============================================================
@@ -85,8 +155,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SoundBridge API",
-    description="Receives Morse code words from the ESP32 gateway and stores them.",
-    version="1.0.0",
+    description="Receives raw ESP32 events, processes Morse, and stores completed words.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -113,12 +183,56 @@ def _get_connection() -> mysql.connector.pooling.PooledMySQLConnection:
         ) from exc
 
 
+# ── Helper: insert word into database ────────────────────────
+
+def _insert_word(device_id: str, morse: str, text: str, timestamp: datetime | None = None) -> int:
+    """
+    Insert a completed Morse word into the database.
+    Returns the new row ID.
+    """
+    if timestamp is None:
+        timestamp = datetime.now()
+    
+    conn   = _get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO mensagens (device_id, morse, text, timestamp)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (device_id, morse, text, timestamp),
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        logger.info("[%s] Inserted mensagens.id=%d  text='%s'", device_id, new_id, text)
+        return new_id
+    except mysql.connector.Error as exc:
+        conn.rollback()
+        logger.error("[%s] DB insert failed: %s", device_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database insert failed.",
+        ) from exc
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # =============================================================
 #  Pydantic models
 # =============================================================
 
+class MorseEvent(BaseModel):
+    """Raw event from ESP32 (NEW format)."""
+    device_id: str
+    type: str  # "signal", "letter_end", "word_end"
+    value: str | None = None  # "." or "-" for signal events
+    timestamp: int | None = None
+
+
 class MorseMessage(BaseModel):
-    """Payload sent by the gateway on every word_end event."""
+    """Legacy payload format (OLD format – for backwards compatibility)."""
     device_id: str  = Field(...,  example="esp32_01")
     morse:     str  = Field(...,  example="... --- ...")
     text:      str  = Field(...,  example="SOS")
@@ -136,58 +250,141 @@ class MorseRecord(BaseModel):
 
 
 # =============================================================
+#  Event Processing Logic
+# =============================================================
+
+def process_signal(state: DeviceState, value: str) -> None:
+    """Handle a signal event: append dot or dash to current letter."""
+    if value not in (".", "-"):
+        logger.warning("[%s] Unexpected signal value '%s' – ignoring.", state.device_id, value)
+        return
+    
+    state.current_letter += value
+    logger.debug("[%s] signal '%s' │ letter_morse='%s'", state.device_id, value, state.current_letter)
+
+
+def process_letter_end(state: DeviceState) -> None:
+    """Handle letter_end: decode current letter and add to word buffers."""
+    code = state.current_letter
+    if not code:
+        logger.debug("[%s] letter_end with empty buffer – skipped.", state.device_id)
+        return
+    
+    char = morse_to_char(code)
+    if char:
+        state.current_word_morse.append(code)
+        state.current_word_text.append(char)
+        logger.info(
+            "[%s] letter_end │ '%s' ← '%s'  │  word so far: '%s'",
+            state.device_id, char, code, "".join(state.current_word_text),
+        )
+    else:
+        logger.warning("[%s] letter_end │ unrecognised Morse '%s' – dropped.", state.device_id, code)
+    
+    state.current_letter = ""
+
+
+def process_word_end(state: DeviceState) -> None:
+    """Handle word_end: finalize and save the word to database."""
+    # Flush dangling letter if letter_end was not received
+    if state.current_letter:
+        logger.debug("[%s] word_end: flushing pending letter '%s'.", state.device_id, state.current_letter)
+        process_letter_end(state)
+    
+    if not state.current_word_text:
+        logger.debug("[%s] word_end with empty word buffer – nothing to send.", state.device_id)
+        return
+    
+    morse_str = " ".join(state.current_word_morse)
+    text_str  = "".join(state.current_word_text)
+    
+    logger.info("[%s] word_end │ text='%s'  morse='%s'", state.device_id, text_str, morse_str)
+    
+    # Insert into database
+    _insert_word(state.device_id, morse_str, text_str)
+    
+    # Reset word-level state
+    state.current_word_morse = []
+    state.current_word_text = []
+
+
+# =============================================================
 #  Endpoints
 # =============================================================
 
 @app.post(
     "/morse",
     status_code=status.HTTP_201_CREATED,
-    summary="Store a decoded Morse word",
+    summary="Receive event or legacy word payload",
 )
-def receive_morse(payload: MorseMessage):
+def receive_morse(payload: Dict[str, Any]):
     """
-    Accept a decoded Morse word from the gateway and insert it
-    into the ``mensagens`` table.
+    Accept either:
+    1. NEW format: raw ESP32 event (type: signal/letter_end/word_end)
+    2. OLD format: completed Morse word (morse, text, timestamp fields)
+    
+    The format is auto-detected based on the presence of the 'type' field.
     """
-    # Parse the ISO timestamp string into a Python datetime
-    try:
-        dt = datetime.fromisoformat(payload.timestamp)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid timestamp format: {exc}",
-        ) from exc
-
-    logger.info(
-        "POST /morse │ device='%s'  text='%s'  morse='%s'",
-        payload.device_id, payload.text, payload.morse,
-    )
-
-    conn   = _get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO mensagens (device_id, morse, text, timestamp)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (payload.device_id, payload.morse, payload.text, dt),
+    # Detect format
+    if "type" in payload:
+        # NEW FORMAT: raw event from ESP32
+        try:
+            event = MorseEvent(**payload)
+        except Exception as exc:
+            logger.error("Invalid event payload: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid event format: {exc}",
+            ) from exc
+        
+        logger.debug("[%s] Received event: type='%s'  value='%s'", 
+                    event.device_id, event.type, event.value)
+        
+        # Get device state
+        state = get_device_state(event.device_id)
+        
+        # Process event
+        if event.type == "signal":
+            if event.value:
+                process_signal(state, event.value)
+        elif event.type == "letter_end":
+            process_letter_end(state)
+        elif event.type == "word_end":
+            process_word_end(state)
+        else:
+            logger.warning("[%s] Unknown event type '%s' – ignored.", event.device_id, event.type)
+        
+        return {"status": "processed"}
+    
+    else:
+        # OLD FORMAT: legacy complete word payload
+        try:
+            msg = MorseMessage(**payload)
+        except Exception as exc:
+            logger.error("Invalid legacy payload: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid payload format: {exc}",
+            ) from exc
+        
+        # Parse the ISO timestamp string into a Python datetime
+        try:
+            dt = datetime.fromisoformat(msg.timestamp)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid timestamp format: {exc}",
+            ) from exc
+        
+        logger.info(
+            "[%s] POST /morse (legacy) │ text='%s'  morse='%s'",
+            msg.device_id, msg.text, msg.morse,
         )
-        conn.commit()
-        new_id = cursor.lastrowid
-        logger.info("Inserted mensagens.id=%d.", new_id)
-    except mysql.connector.Error as exc:
-        conn.rollback()
-        logger.error("DB insert failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database insert failed.",
-        ) from exc
-    finally:
-        cursor.close()
-        conn.close()   # returns connection to pool
-
-    return {"id": new_id, "status": "stored"}
+        
+        # Insert directly (bypass state machine)
+        new_id = _insert_word(msg.device_id, msg.morse, msg.text, dt)
+        
+        return {"id": new_id, "status": "stored"}
 
 
 @app.get(

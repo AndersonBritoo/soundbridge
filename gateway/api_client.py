@@ -1,7 +1,7 @@
 # =============================================================
 #  SoundBridge – API Client
 #  Path: gateway/api_client.py
-#  Sends completed Morse words to the FastAPI backend.
+#  Forwards raw ESP32 events to the FastAPI backend.
 #
 #  Features
 #  --------
@@ -12,7 +12,6 @@
 
 import logging
 import time
-from datetime import datetime, timezone
 
 import requests
 
@@ -23,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 class ApiClient:
     """
-    Thin wrapper around ``requests.Session`` that posts word
-    payloads to the configured endpoint.
+    Thin wrapper around ``requests.Session`` that posts raw
+    ESP32 events to the configured endpoint.
     """
 
     def __init__(
@@ -46,16 +45,18 @@ class ApiClient:
 
     # ── Public interface ──────────────────────────────────────
 
-    def send_word(self, morse: str, text: str) -> bool:
+    def send_event(self, event_type: str, value: str | None = None, timestamp: int | None = None) -> bool:
         """
-        POST a completed Morse word to the API.
+        POST a raw ESP32 event to the API.
 
         Parameters
         ----------
-        morse : str
-            Space-separated per-letter Morse sequences, e.g. ``"... --- ..."``.
-        text  : str
-            Decoded plain-text word, e.g. ``"SOS"``.
+        event_type : str
+            Type of event: "signal", "letter_end", "word_end", or "system".
+        value : str | None
+            Event value (e.g., "." or "-" for signal events), None otherwise.
+        timestamp : int | None
+            Event timestamp from ESP32, None if not provided.
 
         Returns
         -------
@@ -65,13 +66,16 @@ class ApiClient:
         """
         payload = {
             "device_id": self.device_id,
-            "morse":     morse,
-            "text":      text,
-            # ISO 8601 timestamp with UTC timezone
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
         }
+        
+        if value is not None:
+            payload["value"] = value
+        
+        if timestamp is not None:
+            payload["timestamp"] = timestamp
 
-        logger.info("→ API | morse='%s'  text='%s'", morse, text)
+        logger.info("→ API | type='%s'  value='%s'", event_type, value or "")
 
         for attempt in range(1, self.retries + 1):
             try:
@@ -99,7 +103,7 @@ class ApiClient:
                 logger.info("Retrying in %gs…", self.retry_delay)
                 time.sleep(self.retry_delay)
 
-        logger.error("All %d attempt(s) failed for word '%s' – data lost.", self.retries, text)
+        logger.error("All %d attempt(s) failed for event type '%s' – data lost.", self.retries, event_type)
         return False
 
     def close(self) -> None:

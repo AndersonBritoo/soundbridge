@@ -2,8 +2,8 @@
 # =============================================================
 #  SoundBridge – Gateway Entry Point
 #  Path: gateway/main.py
-#  Wires SerialReader → MorseProcessor → ApiClient together
-#  and runs the main event loop.
+#  Bridges ESP32 serial events directly to the API.
+#  All Morse processing now happens on the API side.
 #
 #  Usage
 #  -----
@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from gateway.config        import LOG_LEVEL, LOG_FORMAT, LOG_DATE_FORMAT
 from gateway.serial_reader import SerialReader
-from gateway.processor     import MorseProcessor
 from gateway.api_client    import ApiClient
 
 
@@ -39,7 +38,10 @@ def _configure_logging() -> None:
 
 def run() -> None:
     """
-    Main loop – reads ESP32 messages and feeds them to the processor.
+    Main loop – reads ESP32 messages and forwards them to the API.
+
+    The Gateway no longer processes Morse logic.
+    It acts as a simple bridge: Serial → API.
 
     The loop is designed to be indestructible:
     - Serial errors are handled inside SerialReader (auto-reconnect).
@@ -51,11 +53,10 @@ def run() -> None:
     logger = logging.getLogger(__name__)
 
     logger.info("=" * 56)
-    logger.info("  SoundBridge Gateway  –  starting")
+    logger.info("  SoundBridge Gateway  –  starting (bridge mode)")
     logger.info("=" * 56)
 
     with SerialReader() as reader, ApiClient() as api:
-        processor = MorseProcessor(api_client=api)
         logger.info("Listening on '%s'…  (Ctrl-C to stop)", reader.port)
 
         while True:
@@ -68,7 +69,22 @@ def run() -> None:
                     continue
 
                 logger.debug("MSG ← %s", message)
-                processor.handle(message)
+
+                # Extract event details from ESP32 message
+                event_type = message.get("type")
+                value = message.get("value")
+                timestamp = message.get("timestamp")
+
+                # Handle system messages locally (no need to forward)
+                if event_type == "system":
+                    logger.info("ESP32: %s", message.get("message"))
+                    continue
+
+                # Forward all other events directly to API
+                if event_type:
+                    api.send_event(event_type=event_type, value=value, timestamp=timestamp)
+                else:
+                    logger.warning("Message missing 'type' field – ignored: %s", message)
 
             except KeyboardInterrupt:
                 logger.info("Interrupted by user – shutting down.")
