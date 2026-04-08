@@ -22,10 +22,14 @@
 
 from fastapi import FastAPI
 
+from dotenv import load_dotenv
+
 from api.core.config import setup_logging, AppConfig
 from api.db.connection import lifespan
 from api.routes.morse import router as morse_router
 
+# Initialize dotenv
+load_dotenv()
 
 # Initialize logging
 setup_logging()

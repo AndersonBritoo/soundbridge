@@ -27,7 +27,7 @@ class DatabaseConfig:
     PORT: int = int(os.getenv("DB_PORT", "3306"))
     USER: str = os.getenv("DB_USER", "root")
     PASSWORD: str = os.getenv("DB_PASSWORD", "")
-    DATABASE: str = "soundbridge"
+    DATABASE: str = os.getenv("DB_NAME", "soundbridge")
     POOL_SIZE: int = 5
     
     @classmethod
@@ -48,4 +48,4 @@ class AppConfig:
     
     TITLE: str = "SoundBridge"
     DESCRIPTION: str = "Receives raw ESP32 events, processes Morse, and stores completed words."
-    VERSION: str = "2.2.0"
+    VERSION: str = "2.2.1"
