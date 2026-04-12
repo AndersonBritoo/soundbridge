@@ -118,6 +118,30 @@ def list_morse(limit: int = 100, offset: int = 0):
     rows = repository.get_all_messages(limit=limit, offset=offset)
     return rows
 
+@router.get(
+    "/morse/latest",
+    summary="Return the most recently inserted message",
+)
+def get_latest_morse():
+    """
+    Return the latest record in mensagens.
+    
+    Returns a lightweight JSON suitable for ESP32 polling:
+    - 200 + record  → message found
+    - 200 + status  → table is empty (no 404, easier to parse on ESP32)
+    """
+    row = repository.get_latest_message()
+
+    if row is None:
+        logger.info("GET /morse/latest → empty table.")
+        return {"status": "empty"}
+
+    logger.info(
+        "GET /morse/latest → id=%d  device='%s'  text='%s'",
+        row["id"], row["device_id"], row["text"],
+    )
+    return row
+
 
 @router.get(
     "/morse/{message_id}",

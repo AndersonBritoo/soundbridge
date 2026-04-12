@@ -154,3 +154,36 @@ class MorseRepository:
         finally:
             cursor.close()
             conn.close()
+
+    @staticmethod
+    def get_latest_message() -> Dict[str, Any] | None:
+        """
+        Retrieve the most recently inserted message.
+
+        Returns
+        -------
+        Dict[str, Any] | None
+            The latest message record, or None if the table is empty.
+
+        Raises
+        ------
+        HTTPException
+            500 if the database query fails.
+        """
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                "SELECT * FROM mensagens ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return row
+        except mysql.connector.Error as exc:
+            logger.error("DB select latest failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database query failed.",
+            ) from exc
+        finally:
+            cursor.close()
+            conn.close()
