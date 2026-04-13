@@ -48,4 +48,4 @@ class AppConfig:
     
     TITLE: str = "SoundBridge"
     DESCRIPTION: str = "Receives raw ESP32 events, processes Morse, and stores completed words."
-    VERSION: str = "2.2.1"
+    VERSION: str = "2.3.0"
