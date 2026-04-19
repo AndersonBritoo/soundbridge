@@ -1,253 +1,238 @@
-# 🌉 SoundBridge
+# SoundBridge
 
-Sistema IoT para captura, interpretação e armazenamento de sinais em Código Morse.
-
----
-
-## 📖 Descrição
-
-O **SoundBridge** é um sistema distribuído que permite captar sinais físicos através de um botão ligado a um ESP32, convertê-los em Código Morse (`.` e `-`), processar esses sinais em tempo real e armazenar o resultado numa base de dados.
-
-O sistema está dividido em três camadas principais:
-
-* **ESP32 (Hardware)** → captação de sinais
-* **Gateway (Python)** → comunicação e envio de dados
-* **API (FastAPI)** → processamento, lógica e armazenamento
+SoundBridge é um sistema embebido de comunicação por código Morse, composto por firmware para ESP32, um gateway serial-HTTP e uma API REST com base de dados MySQL. O utilizador pressiona um botão físico para introduzir sinais Morse; o sistema descodifica-os em tempo real e persiste as palavras resultantes, que ficam disponíveis para consulta via display TFT ou API.
 
 ---
 
-## 🧠 Objetivo
-
-Demonstrar uma arquitetura completa de integração entre:
-
-* Sistemas embebidos (ESP32)
-* Comunicação Serial (USB)
-* Processamento em tempo real
-* APIs REST (FastAPI)
-* Bases de dados relacionais (MySQL)
-
----
-
-## ⚙️ Arquitetura do Sistema
+## Arquitetura do Sistema
 
 ```
-    [Utilizador]
-         ↓
-      [ESP32]
-         ↓            (Serial - JSON)
-  [Gateway (Python)]
-         ↓            (HTTP - JSON)
-   [API (FastAPI)]
-         ↓
-[Base de Dados (MySQL)]
+┌─────────────────────────────────────────────────────────┐
+│                      ESP32 Firmware                     │
+│  Botão → Morse → JSON Serial  |  TFT Display ← Poll HTTP│
+└────────────────┬────────────────────────────────────────┘
+                 │ USB Serial (JSON)
+┌────────────────▼────────────────────────────────────────┐
+│                        Gateway                          │
+│         SerialReader → ApiClient → HTTP POST            │
+└────────────────┬────────────────────────────────────────┘
+                 │ HTTP REST
+┌────────────────▼────────────────────────────────────────┐
+│                       API (FastAPI)                     │
+│  routes → services → repository → MySQL                 │
+└─────────────────────────────────────────────────────────┘
 ```
 
----
+### Componentes
 
-## 🔌 Hardware Utilizado
-
-* ESP32
-* Botão (GPIO 5)
-* LED Azul (GPIO 12) → Ponto `.`
-* LED Vermelho (GPIO 13) → Traço `-`
-
----
-
-## 🔁 Funcionamento do Sistema
-
-1. O utilizador pressiona o botão no ESP32
-2. O ESP32 mede a duração do clique:
-
-   * Curto → `.`
-   * Longo → `-`
-3. O ESP32 envia eventos em JSON via Serial
-4. O Gateway:
-
-   * Lê os dados
-   * Envia diretamente para a API
-5. A API:
-
-   * Processa os sinais Morse
-   * Reconstrói letras e palavras
-   * Armazena na base de dados
+| Componente | Tecnologia | Localização |
+|---|---|---|
+| Firmware | C++ / PlatformIO / ESP32 | `firmware/esp32/` |
+| Gateway | Python / pyserial / requests | `gateway/` |
+| API | Python / FastAPI / MySQL | `api/` |
+| Base de Dados | MySQL / MariaDB | `db/` |
 
 ---
 
-## 🧾 Protocolo de Comunicação
-
-### Sinais
-
-```json
-{ "type": "signal", "value": ".", "timestamp": 123456 }
-{ "type": "signal", "value": "-", "timestamp": 123456 }
-```
-
-### Eventos
-
-```json
-{ "type": "letter_end", "timestamp": 123456 }
-{ "type": "word_end", "timestamp": 123456 }
-```
-
----
-
-## 🧩 Estrutura do Projeto
+## Estrutura do Projeto
 
 ```
 soundbridge/
-│
-├── esp32/
-│   └── soundbridge/
-│       └── soundbridge.ino       # Firmware do ESP32
-│
-├── gateway/
-│   ├── main.py                  # Loop principal
-│   ├── serial_reader.py         # Leitura da Serial
-│   ├── api_client.py            # Comunicação com API
-│   └── config.py                # Configurações
-│
-├── api/
-│   ├── main.py                  # Inicialização da API
-│   │
-│   ├── routes/
-│   │   └── morse.py             # Endpoints
-│   │
-│   ├── services/
-│   │   ├── device_service.py    # Estado dos dispositivos
-│   │   └── morse_service.py     # Lógica Morse
-│   │
+├── api/                    # API REST (FastAPI)
+│   ├── main.py             # Ponto de entrada; instância FastAPI e lifespan
+│   ├── core/
+│   │   └── config.py       # Configuração centralizada (DB, logging, metadados)
 │   ├── db/
-│   │   ├── connection.py        # Ligação à base de dados
-│   │   └── repository.py        # Queries
-│   │
+│   │   ├── connection.py   # Pool de conexões MySQL
+│   │   └── repository.py   # Operações CRUD (repository pattern)
 │   ├── models/
-│   │   └── morse.py             # Modelos Pydantic
-│   │
-│   └── core/
-│       └── config.py            # Configurações e logging
-│
-├── database/
-│   └── structure.sql            # Estrutura da base de dados
-│
-├── logs/
-│   ├── api/
-│   └── gateway/
-│
-├── .gitignore
-├── LICENSE
-└── README.md
+│   │   └── morse.py        # Modelos Pydantic (MorseEvent, MorseMessage, MorseRecord)
+│   ├── routes/
+│   │   └── morse.py        # Endpoints HTTP
+│   ├── services/
+│   │   ├── device_service.py  # Máquina de estados por dispositivo
+│   │   └── morse_service.py   # Tabela de descodificação Morse
+│   └── requirements.txt
+├── db/
+│   └── schema.sql          # Schema MySQL
+├── firmware/
+│   └── esp32/
+│       ├── src/            # Código-fonte C++
+│       │   ├── main.cpp
+│       │   ├── button.cpp
+│       │   ├── leds.cpp
+│       │   ├── morse.cpp
+│       │   ├── poller.cpp
+│       │   ├── soundbridge_wifi.cpp
+│       │   └── ui.cpp
+│       ├── include/        # Headers
+│       │   └── config.h    # Todas as constantes do firmware
+│       └── platformio.ini
+└── gateway/                # Ponte Serial → API
+    ├── main.py
+    ├── serial_reader.py
+    ├── api_client.py
+    └── config.py
 ```
 
 ---
 
-## 🗄️ Base de Dados
+## Pré-requisitos
 
-Tabela principal: `mensagens`
+### API
+- Python 3.10+
+- MySQL 8.0+ ou MariaDB 10.6+
 
-| Campo     | Tipo     | Descrição           |
-| --------- | -------- | ------------------- |
-| id        | INT      | Identificador único |
-| device_id | VARCHAR  | ID do dispositivo   |
-| morse     | TEXT     | Código Morse        |
-| text      | TEXT     | Texto interpretado  |
-| timestamp | DATETIME | Data/hora do evento |
+### Gateway
+- Python 3.10+
+- ESP32 ligado via USB
+
+### Firmware
+- [PlatformIO](https://platformio.org/) (CLI ou extensão VS Code)
+- Placa ESP32 com display TFT ST7789 e botão físico
 
 ---
 
-## 🚀 Como Executar o Projeto
+## Instalação e Execução
 
-### 1. Instalar dependências
+### 1. Base de Dados
 
 ```bash
+mysql -u root -p < db/schema.sql
+```
+
+Cria a base de dados `soundbridge` e a tabela `mensagens`.
+
+### 2. API
+
+```bash
+cd api
+python -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Criar ficheiro `.env` na raiz de `api/`:
+
+```env
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=soundbridge
+DB_PASSWORD=<password>
+DB_NAME=soundbridge
+```
+
+Iniciar o servidor:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+A documentação interativa fica disponível em `http://localhost:8000/docs`.
+
+### 3. Gateway
+
+```bash
+cd gateway
+pip install pyserial requests
+```
+
+Editar `gateway/config.py` com a porta serial correta (ex: `COM3` no Windows, `/dev/ttyUSB0` no Linux) e o endereço da API.
+
+```bash
+python main.py
+```
+
+### 4. Firmware
+
+Editar `firmware/esp32/include/config.h` com as credenciais Wi-Fi e o endereço do servidor da API.
+
+```bash
+cd firmware/esp32
+pio run --target upload
+```
+
 ---
 
-### 2. Configurar Base de Dados
+## Endpoints da API
 
-* Iniciar MySQL (ex: XAMPP)
-* Executar o ficheiro:
+| Método | Path | Descrição |
+|---|---|---|
+| `POST` | `/morse` | Recebe evento do ESP32 (sinal, letter_end, word_end) ou payload legado |
+| `GET` | `/morse` | Lista mensagens com paginação (`limit`, `offset`) |
+| `GET` | `/morse/latest` | Última mensagem inserida |
+| `GET` | `/morse/{id}` | Mensagem por ID |
+| `GET` | `/health` | Estado da API |
+
+### Exemplos de payload (POST `/morse`)
+
+**Formato novo (firmware atual):**
+```json
+{ "device_id": "esp32_01", "type": "signal", "value": "." }
+{ "device_id": "esp32_01", "type": "letter_end" }
+{ "device_id": "esp32_01", "type": "word_end" }
+```
+
+**Formato legado:**
+```json
+{
+  "device_id": "esp32_01",
+  "morse": "... --- ...",
+  "text": "SOS",
+  "timestamp": "2024-05-01T12:00:00+00:00"
+}
+```
+
+---
+
+## Schema da Base de Dados
 
 ```sql
-database/structure.sql
+CREATE TABLE mensagens (
+    id         INT          AUTO_INCREMENT PRIMARY KEY,
+    device_id  VARCHAR(50)  NOT NULL,
+    morse      TEXT         NOT NULL,
+    text       TEXT         NOT NULL,
+    timestamp  DATETIME     NOT NULL,
+    INDEX idx_device   (device_id),
+    INDEX idx_timestamp(timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
 ---
 
-### 3. Iniciar API
+## Fluxo de Dados
 
-```bash
-uvicorn api.main:app --reload
+```
+[Botão pressionado]
+       ↓
+button.cpp → duração da pressão
+       ↓
+morse.cpp → classifica "." ou "-" → JSON para Serial
+       ↓
+gateway/serial_reader.py → lê linha JSON
+       ↓
+gateway/api_client.py → POST /morse
+       ↓
+api/routes/morse.py → deteta tipo de evento
+       ↓
+api/services/device_service.py → máquina de estados
+       ↓  (em word_end)
+api/services/morse_service.py → descodifica Morse → texto
+       ↓
+api/db/repository.py → INSERT INTO mensagens
+       ↓
+[firmware/poller.cpp] → GET /morse/latest a cada 5s
+       ↓
+ui.cpp → atualiza display TFT
 ```
 
-Aceder a:
-👉 [http://localhost:8000/docs](http://localhost:8000/docs)
-
 ---
 
-### 4. Configurar Gateway
+## Licença
 
-Editar:
+Consultar [LICENSE](LICENSE).
 
-```python
-SERIAL_PORT = "COM3"
-```
-
----
-
-### 5. Iniciar Gateway
-
-```bash
-python gateway/main.py
-```
-
----
-
-### 6. Executar ESP32
-
-* Upload do código para o ESP32
-* Ligar via USB
-
----
-
-## 📊 Funcionalidades
-
-* Captura de input físico (botão)
-* Classificação de sinais (ponto/traço)
-* Separação automática de letras e palavras
-* Processamento de Morse na API
-* Comunicação Serial com JSON
-* Comunicação com API REST
-* Armazenamento em base de dados
-* Estrutura modular e escalável
-
----
-
-## 📌 Estado do Projeto
-
-🚧 Em desenvolvimento
-📍 Sistema base funcional (ESP32 + Gateway + API + DB)
-
----
-
-## 🔮 Próximos Passos
-
-* Comunicação via WiFi (ESP32 → API)
-* Suporte a múltiplos dispositivos
-* Dashboard / interface web
-* Deploy em servidor (VM / Proxmox)
-* Interface gráfica no ESP32 (display)
-
----
-
-## 📌 GitHub
-
-[https://github.com/AndersonBritoo/soundbridge](https://github.com/AndersonBritoo/soundbridge)
-
----
-
-## 👨‍💻 Autor
+## Autor
 
 Andérson
-Curso GPSI - 12º Ano
